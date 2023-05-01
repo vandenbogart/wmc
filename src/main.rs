@@ -1,8 +1,8 @@
-use std::io::Read;
-use std::net::{UdpSocket, ToSocketAddrs, Ipv4Addr};
+use std::io::{Read, Write};
+use std::net::{UdpSocket, ToSocketAddrs, Ipv4Addr, TcpStream, SocketAddr};
 use std::path::{self, Path};
 use std::fs::{self, File};
-use std::str::FromStr;
+use std::str::{FromStr, from_utf8};
 use std::{u64, i64, u16};
 
 use byteorder::{BigEndian, ByteOrder};
@@ -143,6 +143,7 @@ impl AnnounceRequest {
     }
 }
 
+
 #[derive(Debug)]
 struct PeerAddress {
     address: Ipv4Addr,
@@ -155,6 +156,9 @@ impl PeerAddress {
             address,
             port: BigEndian::read_u16(&bytes[4..6]),
         }
+    }
+    fn to_host_port(&self) -> String {
+        format!("{}:{}", self.address, self.port)
     }
 }
 
@@ -218,6 +222,62 @@ impl Tracker {
     }
 }
 
+const BITTORRENT_PROTOCOL: &str = "BitTorrent protocol";
+const PSTR_LEN_BYTE: u8 = 19;
+const INFO_HASH_LEN: usize = 20;
+const PEER_ID_LEN: usize = 20;
+const PEER_CONNECTION_REQUEST_LEN: usize = 68;
+
+#[derive(Debug)]
+struct PeerConnectionData {
+    pstr_len: usize,
+    pstr: [u8; 19],
+    reserved: [u8; 8],
+    info_hash: [u8; INFO_HASH_LEN],
+    peer_id: [u8; PEER_ID_LEN],
+}
+impl PeerConnectionData {
+    fn new(info_hash: [u8; INFO_HASH_LEN], peer_id: [u8; PEER_ID_LEN]) -> Self {
+        let mut pstr = [0u8; PSTR_LEN_BYTE as usize];
+        pstr.copy_from_slice(BITTORRENT_PROTOCOL.as_bytes());
+        Self {
+            pstr_len: 19,
+            pstr,
+            reserved: [0u8; 8],
+            info_hash,
+            peer_id,
+        }
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0u8; PEER_CONNECTION_REQUEST_LEN];
+        BigEndian::write_int(&mut bytes, self.pstr_len as i64, 1);
+        bytes[1..20].copy_from_slice(&self.pstr);
+        bytes[20..28].copy_from_slice(&self.reserved);
+        bytes[28..48].copy_from_slice(&self.info_hash);
+        bytes[48..68].copy_from_slice(&self.peer_id);
+        bytes
+    }
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let pstr_len = BigEndian::read_int(&bytes, 1) as usize;
+        let mut pstr = [0u8; 19];
+        let mut reserved = [0u8; 8];
+        let mut info_hash = [0u8; INFO_HASH_LEN];
+        let mut peer_id = [0u8; PEER_ID_LEN];
+        pstr.copy_from_slice(&bytes[1..20]);
+        reserved.copy_from_slice(&bytes[20..28]);
+        info_hash.copy_from_slice(&bytes[28..48]);
+        peer_id.copy_from_slice(&bytes[48..68]);
+        Self {
+            pstr_len,
+            pstr,
+            reserved,
+            info_hash,
+            peer_id,
+        }
+    }
+
+}
+
 fn main() -> anyhow::Result<()> {
     let magnet = "magnet:?xt=urn:btih:62B9305B850F2219B960929EC4CBD2E826004D73&dn=Eminem+-+Curtain+Call+2+%28Explicit%29+%282022%29+Mp3+320kbps+%5BPMEDIA%5D+%E2%AD%90%EF%B8%8F&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce&tr=udp%3A%2F%2Fopen.demonii.com%3A1337&tr=udp%3A%2F%2F9.rarbg.me%3A2980%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.moeking.me%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Fexplodie.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fretracker.lanta-net.ru%3A2710%2Fannounce&tr=udp%3A%2F%2Ftracker.tiny-vps.com%3A6969%2Fannounce&tr=http%3A%2F%2Ftracker.files.fm%3A6969%2Fannounce&tr=udp%3A%2F%2Ffe.dealclub.de%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.leech.ie%3A1337%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=http%3A%2F%2Ftracker.openbittorrent.com%3A80%2Fannounce&tr=udp%3A%2F%2Fopentracker.i2p.rocks%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.internetwarriors.net%3A1337%2Fannounce&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fcoppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.zer0day.to%3A1337%2Fannounce";
 
@@ -275,12 +335,13 @@ fn main() -> anyhow::Result<()> {
     rand::thread_rng().fill(&mut peer_id[..]);
     let signature = "-WM0001-";
     peer_id[0..signature.len()].copy_from_slice(signature.as_bytes());
+    let info_hash = link.exact_topic;
 
 
     let announce_request = AnnounceRequest::new(AnnounceRequestDescriptor {
         connection_id,
         peer_id,
-        info_hash: link.exact_topic,
+        info_hash,
         downloaded: 0,
         left: 0,
         uploaded: 0,
@@ -297,13 +358,35 @@ fn main() -> anyhow::Result<()> {
     let announce_response = AnnounceResponse::from_bytes(&buffer, number_of_bytes);
     dbg!(&announce_response);
 
+    let peer = &announce_response.peers[2];
 
-    println!(
-        "Received {} bytes from {}: {}",
-        number_of_bytes,
-        src_addr,
-        String::from_utf8_lossy(&buffer[..number_of_bytes])
-    );
+    dbg!(peer);
+    let mut stream = TcpStream::connect("70.81.126.161:2372")?;
+    println!("Successfully connected to server at {}", peer.address);
+
+    let request = PeerConnectionData::new(info_hash, peer_id);
+    dbg!(&request);
+    stream.write_all(&request.to_bytes()).expect("Failed to send data");
+
+    let mut buffer = [0; 1024];
+    match stream.read(&mut buffer) {
+        Ok(number_of_bytes) => {
+            let response = PeerConnectionData::from_bytes(&buffer[..number_of_bytes]);
+            if request.info_hash != response.info_hash {
+                panic!("Mismatched info hash");
+            }
+            dbg!(&response);
+            println!(
+                "Received {} bytes: {}",
+                number_of_bytes,
+                String::from_utf8_lossy(&buffer[..number_of_bytes])
+            );
+        }
+        Err(e) => {
+            eprintln!("Failed to receive data: {}", e);
+        }
+    }
+
 
     Ok(())
 }
