@@ -1,11 +1,11 @@
-use std::io::{Read, Write};
-use std::net::{UdpSocket, ToSocketAddrs, Ipv4Addr, TcpStream, SocketAddr};
-use std::path::{self, Path};
 use std::fs::{self, File};
-use std::str::{FromStr, from_utf8};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::path::{self, Path};
+use std::str::{from_utf8, FromStr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::{u64, i64, u16, thread};
+use std::{i64, thread, u16, u64};
 
 use byteorder::{BigEndian, ByteOrder};
 use rand::Rng;
@@ -67,7 +67,6 @@ impl ConnectResponse {
             transaction_id,
             connection_id,
         }
-
     }
 }
 
@@ -76,7 +75,7 @@ enum AnnounceEvent {
     None = 0,
     Completed,
     Started,
-    Stopped
+    Stopped,
 }
 
 #[derive(Debug)]
@@ -145,11 +144,10 @@ impl AnnounceRequest {
     }
 }
 
-
 #[derive(Debug)]
 struct PeerAddress {
     address: Ipv4Addr,
-    port: u16
+    port: u16,
 }
 impl PeerAddress {
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -213,7 +211,7 @@ impl Tracker {
             protocol: match url.scheme() {
                 "udp" => TrackerProtocol::UDP,
                 "http" => TrackerProtocol::HTTP,
-                &_ => panic!("Unhandled tracker protocol: {}", url.scheme())
+                &_ => panic!("Unhandled tracker protocol: {}", url.scheme()),
             },
             host: url.host_str().unwrap().into(),
             port: url.port().unwrap_or(80),
@@ -277,7 +275,6 @@ impl PeerConnectionData {
             peer_id,
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -287,11 +284,11 @@ struct PeerMessage {
 }
 impl PeerMessage {
     fn from_bytes(bytes: &[u8]) -> Self {
-        if  bytes.len() == 0 {
+        if bytes.len() == 0 {
             return Self {
                 message_id: 0,
                 payload: Vec::new(),
-            }
+            };
         }
         dbg!(bytes.len());
         let payload_length = bytes.len() - 1 as usize;
@@ -319,13 +316,13 @@ impl<'a> Iterator for PeerMessageIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.buffer.len() < 4 {
             // might lose bytes here
-            return None
+            return None;
         }
         let message_length = BigEndian::read_int(self.buffer, 4) as usize;
         self.buffer = &self.buffer[4..];
         if message_length > self.buffer.len() {
             // wait for more data
-            return None
+            return None;
         }
         let message = PeerMessage::from_bytes(self.buffer);
         self.buffer = &self.buffer[message_length..];
@@ -350,14 +347,14 @@ fn main() -> anyhow::Result<()> {
                 let info_string = value[value.len() - 40..].as_bytes();
                 let bytes = hex::decode(info_string)?;
                 exact_topic.copy_from_slice(bytes.as_slice());
-            },
+            }
             "dn" => {
                 display_name = String::from(value);
-            },
+            }
             "tr" => {
                 let tracker = Tracker::from_magnet_link(value);
                 trackers.push(tracker);
-            },
+            }
             &_ => (),
         }
     }
@@ -392,7 +389,6 @@ fn main() -> anyhow::Result<()> {
     let info_hash = link.exact_topic;
     let host_peer = Arc::new(HostPeer::new(info_hash, peer_id));
 
-
     let announce_request = AnnounceRequest::new(AnnounceRequestDescriptor {
         connection_id,
         peer_id,
@@ -405,7 +401,10 @@ fn main() -> anyhow::Result<()> {
 
     dbg!(&announce_request);
 
-    client_socket.send_to(announce_request.to_bytes().as_slice(), tracker.to_host_port())?;
+    client_socket.send_to(
+        announce_request.to_bytes().as_slice(),
+        tracker.to_host_port(),
+    )?;
 
     let mut buffer = [0u8; 4096];
     let (number_of_bytes, src_addr) = client_socket.recv_from(&mut buffer)?;
@@ -413,15 +412,18 @@ fn main() -> anyhow::Result<()> {
     let announce_response = AnnounceResponse::from_bytes(&buffer, number_of_bytes);
     dbg!(&announce_response);
 
-    let socket_addrs = announce_response.peers.iter().flat_map(|peer| peer.to_host_port().to_socket_addrs().unwrap());
-
+    let socket_addrs = announce_response
+        .peers
+        .iter()
+        .flat_map(|peer| peer.to_host_port().to_socket_addrs().unwrap());
 
     let mut handles = vec![];
     for addr in socket_addrs {
         let host_peer = Arc::clone(&host_peer);
         let handle = thread::spawn(move || {
             println!("Trying {}", addr);
-            if let Some(connection) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok() {
+            if let Some(connection) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()
+            {
                 let stream_op = Some(connection);
                 let stream = stream_op.unwrap();
                 println!("Success {}", addr);
@@ -434,7 +436,6 @@ fn main() -> anyhow::Result<()> {
 
     for handle in handles {
         handle.join().unwrap();
-
     }
 
     Ok(())
@@ -454,7 +455,6 @@ impl HostPeer {
         }
     }
 }
-
 
 type PeerId = [u8; 20];
 type InfoHash = [u8; 20];
@@ -485,7 +485,9 @@ impl Peer {
 fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
     let request = PeerConnectionData::new(peer.info_hash, peer.peer_id);
     dbg!(&request);
-    stream.write_all(&request.to_bytes()).expect("Failed to send data");
+    stream
+        .write_all(&request.to_bytes())
+        .expect("Failed to send data");
 
     let mut message_queue = [0x8; 1024];
     let mut tail = 0;
@@ -509,7 +511,8 @@ fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
         tail += bytes_read;
 
         if tail >= PEER_CONNECTION_REQUEST_LEN {
-            let response = PeerConnectionData::from_bytes(&message_queue[..PEER_CONNECTION_REQUEST_LEN]);
+            let response =
+                PeerConnectionData::from_bytes(&message_queue[..PEER_CONNECTION_REQUEST_LEN]);
             if request.info_hash != response.info_hash {
                 panic!("Mismatched info hash");
             }
@@ -562,5 +565,4 @@ fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
             tail -= shift;
         }
     }
-
 }
