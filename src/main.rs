@@ -3,7 +3,9 @@ use std::net::{UdpSocket, ToSocketAddrs, Ipv4Addr, TcpStream, SocketAddr};
 use std::path::{self, Path};
 use std::fs::{self, File};
 use std::str::{FromStr, from_utf8};
-use std::{u64, i64, u16};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{u64, i64, u16, thread};
 
 use byteorder::{BigEndian, ByteOrder};
 use rand::Rng;
@@ -233,11 +235,11 @@ struct PeerConnectionData {
     pstr_len: usize,
     pstr: [u8; 19],
     reserved: [u8; 8],
-    info_hash: [u8; INFO_HASH_LEN],
-    peer_id: [u8; PEER_ID_LEN],
+    info_hash: InfoHash,
+    peer_id: PeerId,
 }
 impl PeerConnectionData {
-    fn new(info_hash: [u8; INFO_HASH_LEN], peer_id: [u8; PEER_ID_LEN]) -> Self {
+    fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
         let mut pstr = [0u8; PSTR_LEN_BYTE as usize];
         pstr.copy_from_slice(BITTORRENT_PROTOCOL.as_bytes());
         Self {
@@ -276,6 +278,59 @@ impl PeerConnectionData {
         }
     }
 
+}
+
+#[derive(Debug)]
+struct PeerMessage {
+    message_id: u8,
+    payload: Vec<u8>,
+}
+impl PeerMessage {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        if  bytes.len() == 0 {
+            return Self {
+                message_id: 0,
+                payload: Vec::new(),
+            }
+        }
+        dbg!(bytes.len());
+        let payload_length = bytes.len() - 1 as usize;
+        let message_id = BigEndian::read_int(&bytes, 1) as u8;
+        let mut payload = vec![0u8; payload_length];
+        payload.copy_from_slice(&bytes[1..]);
+        Self {
+            message_id,
+            payload,
+        }
+    }
+}
+
+struct PeerMessageIterator<'a> {
+    buffer: &'a [u8],
+}
+impl<'a> PeerMessageIterator<'a> {
+    fn new(buffer: &'a [u8]) -> Self {
+        Self { buffer }
+    }
+}
+impl<'a> Iterator for PeerMessageIterator<'a> {
+    type Item = PeerMessage;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buffer.len() < 4 {
+            // might lose bytes here
+            return None
+        }
+        let message_length = BigEndian::read_int(self.buffer, 4) as usize;
+        self.buffer = &self.buffer[4..];
+        if message_length > self.buffer.len() {
+            // wait for more data
+            return None
+        }
+        let message = PeerMessage::from_bytes(self.buffer);
+        self.buffer = &self.buffer[message_length..];
+        Some(message)
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -329,13 +384,13 @@ fn main() -> anyhow::Result<()> {
     let response = ConnectResponse::from_bytes(&buffer);
     dbg!(&response);
 
-    let connection_id = response.connection_id;
-
     let mut peer_id = [0u8; 20];
     rand::thread_rng().fill(&mut peer_id[..]);
     let signature = "-WM0001-";
     peer_id[0..signature.len()].copy_from_slice(signature.as_bytes());
+    let connection_id = response.connection_id;
     let info_hash = link.exact_topic;
+    let host_peer = Arc::new(HostPeer::new(info_hash, peer_id));
 
 
     let announce_request = AnnounceRequest::new(AnnounceRequestDescriptor {
@@ -358,35 +413,154 @@ fn main() -> anyhow::Result<()> {
     let announce_response = AnnounceResponse::from_bytes(&buffer, number_of_bytes);
     dbg!(&announce_response);
 
-    let peer = &announce_response.peers[2];
+    let socket_addrs = announce_response.peers.iter().flat_map(|peer| peer.to_host_port().to_socket_addrs().unwrap());
 
-    dbg!(peer);
-    let mut stream = TcpStream::connect("70.81.126.161:2372")?;
-    println!("Successfully connected to server at {}", peer.address);
 
-    let request = PeerConnectionData::new(info_hash, peer_id);
+    let mut handles = vec![];
+    for addr in socket_addrs {
+        let host_peer = Arc::clone(&host_peer);
+        let handle = thread::spawn(move || {
+            println!("Trying {}", addr);
+            if let Some(connection) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok() {
+                let stream_op = Some(connection);
+                let stream = stream_op.unwrap();
+                println!("Success {}", addr);
+                peer(stream, host_peer);
+            }
+            println!("Failed {}", addr);
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+
+    }
+
+    Ok(())
+}
+
+struct HostPeer {
+    peer_id: PeerId,
+    info_hash: InfoHash,
+    has: Vec<bool>,
+}
+impl HostPeer {
+    fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
+        Self {
+            peer_id,
+            info_hash,
+            has: vec![],
+        }
+    }
+}
+
+
+type PeerId = [u8; 20];
+type InfoHash = [u8; 20];
+
+struct Peer {
+    peer_id: PeerId,
+    info_hash: InfoHash,
+    has: Vec<bool>,
+    am_choking: bool,
+    peer_choking: bool,
+    am_interested: bool,
+    peer_interested: bool,
+}
+impl Peer {
+    fn new(peer_id: PeerId, info_hash: InfoHash) -> Self {
+        Self {
+            peer_id,
+            info_hash,
+            has: vec![],
+            am_choking: true,
+            peer_choking: true,
+            am_interested: false,
+            peer_interested: false,
+        }
+    }
+}
+
+fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
+    let request = PeerConnectionData::new(peer.info_hash, peer.peer_id);
     dbg!(&request);
     stream.write_all(&request.to_bytes()).expect("Failed to send data");
 
-    let mut buffer = [0; 1024];
-    match stream.read(&mut buffer) {
-        Ok(number_of_bytes) => {
-            let response = PeerConnectionData::from_bytes(&buffer[..number_of_bytes]);
+    let mut message_queue = [0x8; 1024];
+    let mut tail = 0;
+    // read handshake
+    loop {
+        let mut buffer = [0u8; 1024];
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(0) => {
+                println!("Server closed the connection.");
+                break;
+            }
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Error while reading from stream: {}", e);
+                break;
+            }
+        };
+        //copy read to working buffer
+        message_queue[tail..bytes_read + tail].copy_from_slice(&buffer[..bytes_read]);
+        buffer = [0u8; 1024];
+        tail += bytes_read;
+
+        if tail >= PEER_CONNECTION_REQUEST_LEN {
+            let response = PeerConnectionData::from_bytes(&message_queue[..PEER_CONNECTION_REQUEST_LEN]);
             if request.info_hash != response.info_hash {
                 panic!("Mismatched info hash");
             }
+            if request.pstr != response.pstr {
+                panic!("Mismatched protocol");
+            }
             dbg!(&response);
-            println!(
-                "Received {} bytes: {}",
-                number_of_bytes,
-                String::from_utf8_lossy(&buffer[..number_of_bytes])
-            );
+            message_queue.copy_within(PEER_CONNECTION_REQUEST_LEN.., 0);
+            for i in (message_queue.len() - PEER_CONNECTION_REQUEST_LEN)..message_queue.len() {
+                message_queue[i] = 0;
+            }
+            tail -= PEER_CONNECTION_REQUEST_LEN;
+            break;
         }
-        Err(e) => {
-            eprintln!("Failed to receive data: {}", e);
+    }
+    loop {
+        let mut buffer = [0u8; 1024];
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(0) => {
+                println!("Server closed the connection.");
+                break;
+            }
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Error while reading from stream: {}", e);
+                break;
+            }
+        };
+        //copy read to working buffer
+        message_queue[tail..bytes_read + tail].copy_from_slice(&buffer[..bytes_read]);
+        tail += bytes_read;
+        buffer = [0x8; 1024];
+        while tail >= 4 {
+            // attempt to parse message
+            let length = BigEndian::read_int(&message_queue, 4) as usize;
+            if length > tail - 4 {
+                println!("Waiting for more data");
+                // not enough data
+                break;
+            }
+            println!("Reading message of length {}", length);
+            let peer_message = PeerMessage::from_bytes(&message_queue[4..4 + length]);
+            dbg!(peer_message);
+
+            let shift = 4 + length;
+            message_queue.copy_within(shift.., 0);
+            for i in (message_queue.len() - shift)..message_queue.len() {
+                message_queue[i] = 0;
+            }
+            tail -= shift;
         }
     }
 
-
-    Ok(())
 }
