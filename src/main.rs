@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{self, Path};
 use std::str::{from_utf8, FromStr};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{i64, thread, u16, u64};
@@ -290,7 +291,6 @@ impl PeerMessage {
                 payload: Vec::new(),
             };
         }
-        dbg!(bytes.len());
         let payload_length = bytes.len() - 1 as usize;
         let message_id = BigEndian::read_int(&bytes, 1) as u8;
         let mut payload = vec![0u8; payload_length];
@@ -302,31 +302,46 @@ impl PeerMessage {
     }
 }
 
-struct PeerMessageIterator<'a> {
-    buffer: &'a [u8],
+#[derive(Debug)]
+enum MessageType {
+    Choke = 0,
+    Unchoke,
+    Interested,
+    NotInterested,
+    Have,
+    Bitfield,
+    Request,
+    Piece,
+    Cancel,
+    Port,
 }
-impl<'a> PeerMessageIterator<'a> {
-    fn new(buffer: &'a [u8]) -> Self {
-        Self { buffer }
-    }
-}
-impl<'a> Iterator for PeerMessageIterator<'a> {
-    type Item = PeerMessage;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.buffer.len() < 4 {
-            // might lose bytes here
-            return None;
+#[derive(Debug)]
+struct ReceivedMessage {
+    peer_id: String,
+    type_id: MessageType,
+    payload: Vec<u8>,
+}
+impl ReceivedMessage {
+    fn from_peer_message(message: PeerMessage, peer_id: PeerId) -> Self {
+        let type_id = match message.message_id {
+            0 => MessageType::Choke,
+            1 => MessageType::Unchoke,
+            2 => MessageType::Interested,
+            3 => MessageType::NotInterested,
+            4 => MessageType::Have,
+            5 => MessageType::Bitfield,
+            6 => MessageType::Request,
+            7 => MessageType::Piece,
+            8 => MessageType::Cancel,
+            9 => MessageType::Port,
+            _ => panic!("Invalid message id")
+        };
+        Self {
+            peer_id: String::from_utf8_lossy(&peer_id).to_string(),
+            type_id,
+            payload: message.payload,
         }
-        let message_length = BigEndian::read_int(self.buffer, 4) as usize;
-        self.buffer = &self.buffer[4..];
-        if message_length > self.buffer.len() {
-            // wait for more data
-            return None;
-        }
-        let message = PeerMessage::from_bytes(self.buffer);
-        self.buffer = &self.buffer[message_length..];
-        Some(message)
     }
 }
 
@@ -368,7 +383,6 @@ fn main() -> anyhow::Result<()> {
     let client_socket = UdpSocket::bind("0.0.0.0:0")?;
 
     let request = ConnectRequest::new();
-    dbg!(&request);
     client_socket.send_to(request.to_bytes().as_slice(), tracker.to_host_port())?;
 
     let mut buffer = [0u8; 4096];
@@ -379,7 +393,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     let response = ConnectResponse::from_bytes(&buffer);
-    dbg!(&response);
 
     let mut peer_id = [0u8; 20];
     rand::thread_rng().fill(&mut peer_id[..]);
@@ -399,7 +412,6 @@ fn main() -> anyhow::Result<()> {
         event: AnnounceEvent::None,
     });
 
-    dbg!(&announce_request);
 
     client_socket.send_to(
         announce_request.to_bytes().as_slice(),
@@ -410,7 +422,6 @@ fn main() -> anyhow::Result<()> {
     let (number_of_bytes, src_addr) = client_socket.recv_from(&mut buffer)?;
 
     let announce_response = AnnounceResponse::from_bytes(&buffer, number_of_bytes);
-    dbg!(&announce_response);
 
     let socket_addrs = announce_response
         .peers
@@ -418,20 +429,23 @@ fn main() -> anyhow::Result<()> {
         .flat_map(|peer| peer.to_host_port().to_socket_addrs().unwrap());
 
     let mut handles = vec![];
+    let (tx, rx) = channel::<ReceivedMessage>();
     for addr in socket_addrs {
         let host_peer = Arc::clone(&host_peer);
+        let tx = tx.clone();
         let handle = thread::spawn(move || {
-            println!("Trying {}", addr);
-            if let Some(connection) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()
-            {
-                let stream_op = Some(connection);
-                let stream = stream_op.unwrap();
-                println!("Success {}", addr);
-                peer(stream, host_peer);
-            }
-            println!("Failed {}", addr);
+            println!("Spawning Peer {}", addr);
+            match peer(addr, tx, host_peer.info_hash, host_peer.peer_id) {
+                Ok(_) => (),
+                Err(_) => println!("Failed to connect to {}", addr),
+            };
         });
         handles.push(handle);
+    }
+
+    for message in rx {
+        dbg!(message);
+
     }
 
     for handle in handles {
@@ -482,19 +496,20 @@ impl Peer {
     }
 }
 
-fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
-    let request = PeerConnectionData::new(peer.info_hash, peer.peer_id);
-    dbg!(&request);
-    stream
+fn peer(addr: SocketAddr, tx: Sender<ReceivedMessage>, info_hash: InfoHash, peer_id: PeerId) -> anyhow::Result<()> {
+    let mut connection = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+    let request = PeerConnectionData::new(info_hash, peer_id);
+    connection
         .write_all(&request.to_bytes())
         .expect("Failed to send data");
 
     let mut message_queue = [0x8; 1024];
     let mut tail = 0;
+    let mut peer_id = [0u8; 20];
     // read handshake
     loop {
         let mut buffer = [0u8; 1024];
-        let bytes_read = match stream.read(&mut buffer) {
+        let bytes_read = match connection.read(&mut buffer) {
             Ok(0) => {
                 println!("Server closed the connection.");
                 break;
@@ -519,7 +534,7 @@ fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
             if request.pstr != response.pstr {
                 panic!("Mismatched protocol");
             }
-            dbg!(&response);
+            peer_id = response.peer_id;
             message_queue.copy_within(PEER_CONNECTION_REQUEST_LEN.., 0);
             for i in (message_queue.len() - PEER_CONNECTION_REQUEST_LEN)..message_queue.len() {
                 message_queue[i] = 0;
@@ -530,7 +545,7 @@ fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
     }
     loop {
         let mut buffer = [0u8; 1024];
-        let bytes_read = match stream.read(&mut buffer) {
+        let bytes_read = match connection.read(&mut buffer) {
             Ok(0) => {
                 println!("Server closed the connection.");
                 break;
@@ -553,9 +568,9 @@ fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
                 // not enough data
                 break;
             }
-            println!("Reading message of length {}", length);
             let peer_message = PeerMessage::from_bytes(&message_queue[4..4 + length]);
-            dbg!(peer_message);
+            let received_message = ReceivedMessage::from_peer_message(peer_message, peer_id);
+            tx.send(received_message).unwrap();
 
             let shift = 4 + length;
             message_queue.copy_within(shift.., 0);
@@ -565,4 +580,5 @@ fn peer(mut stream: TcpStream, peer: Arc<HostPeer>) {
             tail -= shift;
         }
     }
+    Ok(())
 }
