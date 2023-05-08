@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+use std::fmt::{Display, Debug};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{self, Path};
 use std::str::{from_utf8, FromStr};
-use std::sync::mpsc::{Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::{i64, thread, u16, u64};
 
@@ -335,7 +337,7 @@ impl ReceivedMessage {
             7 => MessageType::Piece,
             8 => MessageType::Cancel,
             9 => MessageType::Port,
-            _ => panic!("Invalid message id")
+            _ => panic!("Invalid message id"),
         };
         Self {
             peer_id: String::from_utf8_lossy(&peer_id).to_string(),
@@ -400,7 +402,7 @@ fn main() -> anyhow::Result<()> {
     peer_id[0..signature.len()].copy_from_slice(signature.as_bytes());
     let connection_id = response.connection_id;
     let info_hash = link.exact_topic;
-    let host_peer = Arc::new(HostPeer::new(info_hash, peer_id));
+    let mut host_peer = HostPeer::new(info_hash, peer_id);
 
     let announce_request = AnnounceRequest::new(AnnounceRequestDescriptor {
         connection_id,
@@ -411,7 +413,6 @@ fn main() -> anyhow::Result<()> {
         uploaded: 0,
         event: AnnounceEvent::None,
     });
-
 
     client_socket.send_to(
         announce_request.to_bytes().as_slice(),
@@ -431,11 +432,10 @@ fn main() -> anyhow::Result<()> {
     let mut handles = vec![];
     let (tx, rx) = channel::<ReceivedMessage>();
     for addr in socket_addrs {
-        let host_peer = Arc::clone(&host_peer);
         let tx = tx.clone();
         let handle = thread::spawn(move || {
             println!("Spawning Peer {}", addr);
-            match peer(addr, tx, host_peer.info_hash, host_peer.peer_id) {
+            match peer(addr, tx, host_peer.info_hash.clone(), host_peer.peer_id.clone()) {
                 Ok(_) => (),
                 Err(_) => println!("Failed to connect to {}", addr),
             };
@@ -444,8 +444,33 @@ fn main() -> anyhow::Result<()> {
     }
 
     for message in rx {
-        dbg!(message);
+        match message.type_id {
+            MessageType::Choke => {},
+            MessageType::Unchoke => {},
+            MessageType::Interested => {},
+            MessageType::NotInterested => {},
+            MessageType::Have => {
+            },
+            MessageType::Bitfield => {
 
+                let mut bitfield = vec![];
+                for byte in &message.payload {
+                    for i in 0..8 {
+                        let mask = 0b10000000 >> i;
+                        let present = byte & mask > 0;
+                        bitfield.push(present);
+                    }
+                }
+                let mut peer = Peer::new(message.peer_id, host_peer.info_hash);
+                peer.has.has = bitfield;
+                host_peer.connected_peers.insert(peer.peer_id.clone(), peer);
+                dbg!(&host_peer);
+            }
+            MessageType::Request => {},
+            MessageType::Piece => {},
+            MessageType::Cancel => {},
+            MessageType::Port => {},
+        }
     }
 
     for handle in handles {
@@ -455,10 +480,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct HostPeer {
     peer_id: PeerId,
     info_hash: InfoHash,
     has: Vec<bool>,
+    connected_peers: HashMap<String, Peer>
 }
 impl HostPeer {
     fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
@@ -466,6 +493,7 @@ impl HostPeer {
             peer_id,
             info_hash,
             has: vec![],
+            connected_peers: HashMap::new(),
         }
     }
 }
@@ -473,21 +501,44 @@ impl HostPeer {
 type PeerId = [u8; 20];
 type InfoHash = [u8; 20];
 
+#[derive(Debug)]
 struct Peer {
-    peer_id: PeerId,
+    peer_id: String,
     info_hash: InfoHash,
-    has: Vec<bool>,
+    has: BitfieldHas,
     am_choking: bool,
     peer_choking: bool,
     am_interested: bool,
     peer_interested: bool,
 }
+
+struct BitfieldHas {
+    has: Vec<bool>,
+}
+impl BitfieldHas {
+    fn new() -> Self { Self { has: vec![] } }
+}
+impl Display for BitfieldHas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.has.iter().fold(0, |count, &e| if e {count + 1} else {count});
+        f.write_fmt(format_args!("{}/{} pieces", count, self.has.iter().len()))
+                                           
+    }
+}
+impl Debug for BitfieldHas {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.has.iter().fold(0, |count, &e| if e {count + 1} else {count});
+        f.write_fmt(format_args!("{}/{} pieces", count, self.has.iter().len()))
+    }
+}
+
+
 impl Peer {
-    fn new(peer_id: PeerId, info_hash: InfoHash) -> Self {
+    fn new(peer_id: String, info_hash: InfoHash) -> Self {
         Self {
             peer_id,
             info_hash,
-            has: vec![],
+            has: BitfieldHas::new(),
             am_choking: true,
             peer_choking: true,
             am_interested: false,
@@ -496,7 +547,12 @@ impl Peer {
     }
 }
 
-fn peer(addr: SocketAddr, tx: Sender<ReceivedMessage>, info_hash: InfoHash, peer_id: PeerId) -> anyhow::Result<()> {
+fn peer(
+    addr: SocketAddr,
+    tx: Sender<ReceivedMessage>,
+    info_hash: InfoHash,
+    peer_id: PeerId,
+) -> anyhow::Result<()> {
     let mut connection = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
     let request = PeerConnectionData::new(info_hash, peer_id);
     connection
@@ -540,6 +596,7 @@ fn peer(addr: SocketAddr, tx: Sender<ReceivedMessage>, info_hash: InfoHash, peer
                 message_queue[i] = 0;
             }
             tail -= PEER_CONNECTION_REQUEST_LEN;
+            println!("Successfully connected to {}", String::from_utf8_lossy(&response.peer_id));
             break;
         }
     }
