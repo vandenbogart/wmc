@@ -445,15 +445,26 @@ fn main() -> anyhow::Result<()> {
 
     for message in rx {
         match message.type_id {
-            MessageType::Choke => {},
-            MessageType::Unchoke => {},
-            MessageType::Interested => {},
-            MessageType::NotInterested => {},
+            MessageType::Choke => {
+                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
+                peer.peer_choking = true;
+            },
+            MessageType::Unchoke => {
+                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
+                peer.peer_choking = false;
+            },
+            MessageType::Interested => {
+                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
+                peer.peer_interested = true;
+            },
+            MessageType::NotInterested => {
+                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
+                peer.peer_interested = false;
+            },
             MessageType::Have => {
                 let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
                 let index = BigEndian::read_u32(message.payload.as_slice()) as usize;
                 peer.has.mark(index);
-                dbg!(&host_peer);
             },
             MessageType::Bitfield => {
 
@@ -468,13 +479,13 @@ fn main() -> anyhow::Result<()> {
                 let mut peer = Peer::new(message.peer_id, host_peer.info_hash);
                 peer.has.update(bitfield);
                 host_peer.connected_peers.insert(peer.peer_id.clone(), peer);
-                dbg!(&host_peer);
             }
             MessageType::Request => {},
             MessageType::Piece => {},
             MessageType::Cancel => {},
             MessageType::Port => {},
         }
+        dbg!(&host_peer);
     }
 
     for handle in handles {
