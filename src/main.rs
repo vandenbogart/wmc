@@ -450,6 +450,10 @@ fn main() -> anyhow::Result<()> {
             MessageType::Interested => {},
             MessageType::NotInterested => {},
             MessageType::Have => {
+                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
+                let index = BigEndian::read_u32(message.payload.as_slice()) as usize;
+                peer.has.mark(index);
+                dbg!(&host_peer);
             },
             MessageType::Bitfield => {
 
@@ -462,7 +466,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 let mut peer = Peer::new(message.peer_id, host_peer.info_hash);
-                peer.has.has = bitfield;
+                peer.has.update(bitfield);
                 host_peer.connected_peers.insert(peer.peer_id.clone(), peer);
                 dbg!(&host_peer);
             }
@@ -517,6 +521,12 @@ struct BitfieldHas {
 }
 impl BitfieldHas {
     fn new() -> Self { Self { has: vec![] } }
+    fn update(&mut self, bitfield: Vec<bool>) {
+        self.has = bitfield;
+    }
+    fn mark(&mut self, index: usize) {
+        self.has[index] = true;
+    }
 }
 impl Display for BitfieldHas {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
