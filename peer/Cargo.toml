@@ -1,19 +1,9 @@
 [package]
-name = "torrent"
+name = "peer"
 version = "0.1.0"
 edition = "2021"
-
-[workspace]
-members = [
-    "peer",
-]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.70"
 byteorder = "1.4.3"
-hex = "0.4.3"
-rand = "0.8.5"
-url = "2.3.1"
-urlencoding = "2.1.2"

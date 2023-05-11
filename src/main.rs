@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{self, Path};
 use std::str::{from_utf8, FromStr};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Sender, Receiver};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::{i64, thread, u16, u64};
@@ -320,12 +320,12 @@ enum MessageType {
 
 #[derive(Debug)]
 struct ReceivedMessage {
-    peer_id: String,
+    addr: SocketAddr,
     type_id: MessageType,
     payload: Vec<u8>,
 }
 impl ReceivedMessage {
-    fn from_peer_message(message: PeerMessage, peer_id: PeerId) -> Self {
+    fn from_peer_message(message: PeerMessage, addr: SocketAddr) -> Self {
         let type_id = match message.message_id {
             0 => MessageType::Choke,
             1 => MessageType::Unchoke,
@@ -340,7 +340,7 @@ impl ReceivedMessage {
             _ => panic!("Invalid message id"),
         };
         Self {
-            peer_id: String::from_utf8_lossy(&peer_id).to_string(),
+            addr,
             type_id,
             payload: message.payload,
         }
@@ -432,67 +432,87 @@ fn main() -> anyhow::Result<()> {
     let mut handles = vec![];
     let (tx, rx) = channel::<ReceivedMessage>();
     for addr in socket_addrs {
+        let (peer_tx, peer_rx) = channel::<PeerMessage>();
         let tx = tx.clone();
         let handle = thread::spawn(move || {
             println!("Spawning Peer {}", addr);
-            match peer(addr, tx, host_peer.info_hash.clone(), host_peer.peer_id.clone()) {
+            match peer(addr, tx, host_peer.info_hash.clone(), host_peer.peer_id.clone(), peer_rx) {
                 Ok(_) => (),
                 Err(_) => println!("Failed to connect to {}", addr),
             };
         });
+        host_peer.peer_channels.insert(addr, peer_tx.clone());
         handles.push(handle);
     }
-
-    for message in rx {
-        match message.type_id {
-            MessageType::Choke => {
-                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
-                peer.peer_choking = true;
-            },
-            MessageType::Unchoke => {
-                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
-                peer.peer_choking = false;
-            },
-            MessageType::Interested => {
-                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
-                peer.peer_interested = true;
-            },
-            MessageType::NotInterested => {
-                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
-                peer.peer_interested = false;
-            },
-            MessageType::Have => {
-                let peer = host_peer.connected_peers.get_mut(&message.peer_id).expect("Have message for uninitialized peer");
-                let index = BigEndian::read_u32(message.payload.as_slice()) as usize;
-                peer.has.mark(index);
-            },
-            MessageType::Bitfield => {
-
-                let mut bitfield = vec![];
-                for byte in &message.payload {
-                    for i in 0..8 {
-                        let mask = 0b10000000 >> i;
-                        let present = byte & mask > 0;
-                        bitfield.push(present);
-                    }
-                }
-                let mut peer = Peer::new(message.peer_id, host_peer.info_hash);
-                peer.has.update(bitfield);
-                host_peer.connected_peers.insert(peer.peer_id.clone(), peer);
+    loop {
+        //SEND
+        let piece_index = 0;
+        for peer in host_peer.connected_peers.values_mut() {
+            if peer.has.has[piece_index] && !peer.am_interested {
+                let message = PeerMessage {
+                    message_id: 2,
+                    payload: vec![],
+                };
+                let sender = host_peer.peer_channels.get(&peer.addr).unwrap();
+                sender.send(message).unwrap();
+                peer.am_interested = true;
             }
-            MessageType::Request => {},
-            MessageType::Piece => {},
-            MessageType::Cancel => {},
-            MessageType::Port => {},
         }
-        dbg!(&host_peer);
+
+
+        // RECEIVE
+        if let Some(message) = rx.try_recv().ok() {
+            match message.type_id {
+                MessageType::Choke => {
+                    let peer = host_peer.connected_peers.get_mut(&message.addr).expect("Have message for uninitialized peer");
+                    peer.peer_choking = true;
+                },
+                MessageType::Unchoke => {
+                    let peer = host_peer.connected_peers.get_mut(&message.addr).expect("Have message for uninitialized peer");
+                    peer.peer_choking = false;
+                },
+                MessageType::Interested => {
+                    let peer = host_peer.connected_peers.get_mut(&message.addr).expect("Have message for uninitialized peer");
+                    peer.peer_interested = true;
+                },
+                MessageType::NotInterested => {
+                    let peer = host_peer.connected_peers.get_mut(&message.addr).expect("Have message for uninitialized peer");
+                    peer.peer_interested = false;
+                },
+                MessageType::Have => {
+                    let peer = host_peer.connected_peers.get_mut(&message.addr).expect("Have message for uninitialized peer");
+                    let index = BigEndian::read_u32(message.payload.as_slice()) as usize;
+                    peer.has.mark(index);
+                },
+                MessageType::Bitfield => {
+
+                    let mut bitfield = vec![];
+                    for byte in &message.payload {
+                        for i in 0..8 {
+                            let mask = 0b10000000 >> i;
+                            let present = byte & mask > 0;
+                            bitfield.push(present);
+                        }
+                    }
+                    let mut peer = Peer::new(message.addr, host_peer.info_hash);
+                    peer.has.update(bitfield);
+                    host_peer.connected_peers.insert(peer.addr.clone(), peer);
+                }
+                MessageType::Request => {},
+                MessageType::Piece => {},
+                MessageType::Cancel => {},
+                MessageType::Port => {},
+            }
+
+        }
     }
 
-    for handle in handles {
-        handle.join().unwrap();
-    }
 
-    Ok(())
+    // for handle in handles {
+    //     handle.join().unwrap();
+    // }
+
+    // Ok(())
 }
 
 #[derive(Debug)]
@@ -500,7 +520,8 @@ struct HostPeer {
     peer_id: PeerId,
     info_hash: InfoHash,
     has: Vec<bool>,
-    connected_peers: HashMap<String, Peer>
+    connected_peers: HashMap<SocketAddr, Peer>,
+    peer_channels: HashMap<SocketAddr, Sender<PeerMessage>>,
 }
 impl HostPeer {
     fn new(info_hash: InfoHash, peer_id: PeerId) -> Self {
@@ -509,6 +530,7 @@ impl HostPeer {
             info_hash,
             has: vec![],
             connected_peers: HashMap::new(),
+            peer_channels: HashMap::new(),
         }
     }
 }
@@ -518,7 +540,7 @@ type InfoHash = [u8; 20];
 
 #[derive(Debug)]
 struct Peer {
-    peer_id: String,
+    addr: SocketAddr,
     info_hash: InfoHash,
     has: BitfieldHas,
     am_choking: bool,
@@ -555,9 +577,9 @@ impl Debug for BitfieldHas {
 
 
 impl Peer {
-    fn new(peer_id: String, info_hash: InfoHash) -> Self {
+    fn new(addr: SocketAddr, info_hash: InfoHash) -> Self {
         Self {
-            peer_id,
+            addr,
             info_hash,
             has: BitfieldHas::new(),
             am_choking: true,
@@ -573,6 +595,7 @@ fn peer(
     tx: Sender<ReceivedMessage>,
     info_hash: InfoHash,
     peer_id: PeerId,
+    peer_rx: Receiver<PeerMessage>,
 ) -> anyhow::Result<()> {
     let mut connection = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
     let request = PeerConnectionData::new(info_hash, peer_id);
@@ -622,6 +645,9 @@ fn peer(
         }
     }
     loop {
+        if let Some(message) = peer_rx.try_recv().ok() {
+            dbg!(message);
+        }
         let mut buffer = [0u8; 1024];
         let bytes_read = match connection.read(&mut buffer) {
             Ok(0) => {
@@ -647,7 +673,7 @@ fn peer(
                 break;
             }
             let peer_message = PeerMessage::from_bytes(&message_queue[4..4 + length]);
-            let received_message = ReceivedMessage::from_peer_message(peer_message, peer_id);
+            let received_message = ReceivedMessage::from_peer_message(peer_message, addr);
             tx.send(received_message).unwrap();
 
             let shift = 4 + length;
