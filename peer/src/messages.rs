@@ -87,9 +87,9 @@ impl From<u8> for MessageTypes {
     }
 }
 
-struct RawMessage {
-    message_id: u8,
-    payload: Vec<u8>,
+pub struct RawMessage {
+    pub message_id: u8,
+    pub payload: Vec<u8>,
 }
 impl From<&[u8]> for RawMessage {
     fn from(bytes: &[u8]) -> Self {
