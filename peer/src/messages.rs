@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn test_handshake_conversions() {
-        let mut pstr = vec![0u8; 19];
-        pstr.copy_from_slice("BitTorrent protocol".as_bytes());
+        let mut pstr = vec![0u8; 10];
+        pstr.copy_from_slice("protocol88".as_bytes());
         let mut info_hash = vec![0u8; 20];
         info_hash.copy_from_slice("abcdefghijklmnopijuo".as_bytes());
         let mut peer_id = vec![0u8; 20];
