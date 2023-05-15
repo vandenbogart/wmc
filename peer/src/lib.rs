@@ -5,7 +5,7 @@
  * wraps network communication.
  */
 mod messages;
-
+mod peer_stream;
 
 #[cfg(test)]
 mod tests {
