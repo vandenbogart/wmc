@@ -1,7 +1,13 @@
+use async_std::prelude::*;
+use async_std::{
+    io::{Read, Write},
+    net::TcpStream,
+};
 use std::{
     cmp::{max, min},
-    io::{Read, Write},
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs},
+    pin::Pin,
+    task::Poll,
     time::Duration,
 };
 
@@ -28,17 +34,18 @@ struct PeerStream {
     handshake: HandShake,
 }
 impl PeerStream {
-    pub fn connect(addr: SocketAddr, opts: PeerStreamOpts) -> anyhow::Result<PeerStream> {
-        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+    pub async fn connect(addr: SocketAddr, opts: PeerStreamOpts) -> anyhow::Result<PeerStream> {
+        let stream = TcpStream::connect(&addr)
+            .await
             .context("Failed to connect to peer")?;
-        let response_handshake = PeerStream::handshake(&stream, opts)?;
+        let response_handshake = PeerStream::handshake(&stream, opts).await?;
         Ok(PeerStream {
             addr,
             stream,
             handshake: response_handshake,
         })
     }
-    fn handshake(
+    async fn handshake(
         ref mut stream: impl Read + Write + Unpin,
         opts: PeerStreamOpts,
     ) -> anyhow::Result<HandShake> {
@@ -49,10 +56,12 @@ impl PeerStream {
         };
         stream
             .write_all(&request_handshake.to_bytes())
+            .await
             .context("Failed to write handshake")?;
         let mut bytes = vec![0u8; request_handshake.to_bytes().len()];
         stream
             .read_exact(&mut bytes)
+            .await
             .context("Failed to read handshake")?;
         let response_handshake = HandShake::from_bytes(&bytes);
         if request_handshake.pstr != response_handshake.pstr {
@@ -62,15 +71,17 @@ impl PeerStream {
         }
         Ok(response_handshake)
     }
-    fn read_message(ref mut stream: impl Read + Write + Unpin) -> anyhow::Result<RawMessage> {
+    async fn read_message(ref mut stream: impl Read + Write + Unpin) -> anyhow::Result<RawMessage> {
         let mut length = vec![0u8; 4];
         stream
             .read_exact(&mut length)
+            .await
             .context("Failed to read message length")?;
         let length = BigEndian::read_int(&length, 4) as usize;
         let mut message_bytes = vec![0u8; length];
         stream
             .read_exact(&mut message_bytes)
+            .await
             .context("Failed to read message")?;
         Ok(RawMessage::from(&message_bytes[..]))
     }
@@ -81,21 +92,39 @@ struct MockTcpStream {
     write_data: Vec<u8>,
 }
 impl Read for MockTcpStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
         let end = min(buf.len(), self.read_data.len());
         buf[..end].copy_from_slice(&self.read_data[..end]);
-        self.read_data = self.read_data[end..].to_vec();
-        Ok(end)
+        self.get_mut().read_data = self.read_data[end..].to_vec();
+        Poll::Ready(Ok(end))
     }
 }
 impl Write for MockTcpStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.write_data = Vec::from(buf);
-        Ok(buf.len())
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.get_mut().write_data = Vec::from(buf);
+        Poll::Ready(Ok(buf.len()))
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }
 impl Unpin for MockTcpStream {}
@@ -103,11 +132,9 @@ impl Unpin for MockTcpStream {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
-    use std::thread;
 
-    #[test]
-    fn test_peerstream_handshake() {
+    #[async_std::test]
+    async fn test_peerstream_handshake() {
         let opts = PeerStreamOpts {
             protocol: "test_protocol".as_bytes().to_vec(),
             info_hash: vec![1u8; 20],
@@ -122,12 +149,12 @@ mod tests {
             read_data: expected_response.to_bytes().to_vec(),
             write_data: Vec::new(),
         };
-        let response = PeerStream::handshake(&mut stream, opts).unwrap();
+        let response = PeerStream::handshake(&mut stream, opts).await.unwrap();
         assert_eq!(response.pstr, "test_protocol".as_bytes());
     }
 
-    #[test]
-    fn test_peerstream_bad_info_hash() {
+    #[async_std::test]
+    async fn test_peerstream_bad_info_hash() {
         let opts = PeerStreamOpts {
             protocol: "test_protocol".as_bytes().to_vec(),
             info_hash: vec![0u8; 20],
@@ -142,7 +169,7 @@ mod tests {
             read_data: expected_response.to_bytes().to_vec(),
             write_data: Vec::new(),
         };
-        let response = PeerStream::handshake(&mut stream, opts);
+        let response = PeerStream::handshake(&mut stream, opts).await;
         assert!(response.is_err());
         assert_eq!(
             response.err().unwrap().to_string(),
@@ -150,8 +177,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_peerstream_bad_protocol() {
+    #[async_std::test]
+    async fn test_peerstream_bad_protocol() {
         let opts = PeerStreamOpts {
             protocol: "test_protocol".as_bytes().to_vec(),
             info_hash: vec![1u8; 20],
@@ -166,7 +193,7 @@ mod tests {
             read_data: expected_response.to_bytes().to_vec(),
             write_data: Vec::new(),
         };
-        let response = PeerStream::handshake(&mut stream, opts);
+        let response = PeerStream::handshake(&mut stream, opts).await;
         assert!(response.is_err());
         assert_eq!(
             response.err().unwrap().to_string(),
@@ -174,24 +201,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_peerstream_read_message() {
+    #[async_std::test]
+    async fn test_peerstream_read_message() {
         let mut stream = MockTcpStream {
             read_data: vec![0, 0, 0, 4, 1, 2, 2, 4],
             write_data: Vec::new(),
         };
-        let response = PeerStream::read_message(&mut stream).unwrap();
+        let response = PeerStream::read_message(&mut stream).await.unwrap();
         assert_eq!(response.message_id, 1);
         assert_eq!(response.payload, vec![2, 2, 4]);
     }
 
-    #[test]
-    fn test_peerstream_read_message_keep_alive() {
+    #[async_std::test]
+    async fn test_peerstream_read_message_keep_alive() {
         let mut stream = MockTcpStream {
             read_data: vec![0, 0, 0, 0],
             write_data: Vec::new(),
         };
-        let response = PeerStream::read_message(&mut stream).unwrap();
+        let response = PeerStream::read_message(&mut stream).await.unwrap();
         assert_eq!(response.message_id, 0);
         assert_eq!(response.payload, vec![]);
     }
