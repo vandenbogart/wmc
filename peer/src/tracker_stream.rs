@@ -1,42 +1,56 @@
-use std::net::SocketAddr;
-
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 
 use anyhow::Context;
 use async_std::net::UdpSocket;
 use byteorder::{BigEndian, ByteOrder};
-use rand::{Rng};
+use rand::Rng;
 
 struct TrackerManager {
-    socket: UdpSocket,
     connections: Vec<TrackerConnection>,
 }
 impl TrackerManager {
     pub async fn new() -> anyhow::Result<TrackerManager> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.context("Failed to establish UDP Socket")?;
         Ok(TrackerManager {
-            socket,
             connections: vec![],
         })
     }
     pub async fn connect(&self, addr: SocketAddr) -> anyhow::Result<TrackerConnection> {
-        let connection_id = TrackerManager::handshake(&self.socket, addr).await?;
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .context("Failed to establish UDP Socket")?;
+        let connection_id = TrackerManager::handshake(&socket, addr).await?;
         Ok(TrackerConnection {
             addr,
             connection_id,
         })
     }
-    pub async fn handshake(socket: &UdpSocket, addr: SocketAddr) -> anyhow::Result<u64> {
-        let transaction_id: u32 = rand::random();
-        todo!() // tests for tracker
-
-
+    async fn handshake(socket: &UdpSocket, addr: SocketAddr) -> anyhow::Result<i64> {
+        let request = ConnectRequest::new();
+        let bytes_sent = socket.send_to(&request.to_bytes(), &addr).await?;
+        if bytes_sent != CONNECT_REQUEST_SIZE {
+            anyhow::bail!("Unable to send connect request");
+        }
+        let mut bytes_recv = [0u8; CONNECT_RESPONSE_SIZE];
+        loop {
+            let (n, peer) = socket.recv_from(&mut bytes_recv).await?;
+            if peer != addr {
+                continue;
+            } else if n != CONNECT_RESPONSE_SIZE {
+                anyhow::bail!("Unable to read connect response");
+            }
+            break;
+        }
+        let response = ConnectResponse::from_bytes(&bytes_recv);
+        if response.transaction_id != request.transaction_id {
+            anyhow::bail!("Mismatched transaction ids");
+        }
+        Ok(response.connection_id)
     }
-
 }
 
 struct TrackerConnection {
     addr: SocketAddr,
-    connection_id: u64,
+    connection_id: i64,
 }
 
 #[derive(Debug)]
@@ -48,6 +62,8 @@ struct ConnectRequest {
 
 const PROTOCOL_ID: i64 = 0x41727101980;
 
+const CONNECT_REQUEST_SIZE: usize = 16;
+const CONNECT_RESPONSE_SIZE: usize = 16;
 impl ConnectRequest {
     fn new() -> Self {
         Self {
@@ -57,7 +73,7 @@ impl ConnectRequest {
         }
     }
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![0u8; std::mem::size_of::<Self>()];
+        let mut bytes = vec![0u8; 16];
         BigEndian::write_i64(&mut bytes[0..8], self.protocol_id);
         BigEndian::write_u32(&mut bytes[8..12], self.action);
         BigEndian::write_u32(&mut bytes[12..16], self.transaction_id);
@@ -155,5 +171,43 @@ impl AnnounceRequest {
         BigEndian::write_i32(&mut bytes[92..96], self.num_want);
         BigEndian::write_u16(&mut bytes[96..98], self.port);
         bytes
+    }
+}
+
+#[derive(Debug)]
+struct AnnounceResponse {
+    action: u32,
+    transaction_id: u32,
+    interval: u32,
+    leechers: u32,
+    seeders: u32,
+    peers: Vec<SocketAddr>,
+}
+impl AnnounceResponse {
+    fn from_bytes(bytes: &[u8], length: usize) -> Self {
+        let action = BigEndian::read_u32(&bytes[0..4]);
+        let transaction_id = BigEndian::read_u32(&bytes[4..8]);
+        let interval = BigEndian::read_u32(&bytes[8..12]);
+        let leechers = BigEndian::read_u32(&bytes[12..16]);
+        let seeders = BigEndian::read_u32(&bytes[16..20]);
+        let peer_list = &bytes[20..length];
+        if peer_list.len() % 6 != 0 {
+            panic!("Invalid peer list size");
+        }
+        let mut peers = Vec::new();
+        for address in peer_list.chunks(6) {
+            let ip = Ipv4Addr::new(address[0], address[1], address[2], address[3]);
+            let port = BigEndian::read_u16(&address[4..6]);
+            let peer = SocketAddr::new(IpAddr::V4(ip), port);
+            peers.push(peer);
+        }
+        Self {
+            action,
+            transaction_id,
+            interval,
+            leechers,
+            seeders,
+            peers,
+        }
     }
 }
