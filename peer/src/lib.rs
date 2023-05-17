@@ -6,6 +6,7 @@
  */
 mod messages;
 mod peer_stream;
+mod tracker_stream;
 
 #[cfg(test)]
 mod tests {

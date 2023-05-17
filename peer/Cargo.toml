@@ -10,4 +10,5 @@ anyhow = "1.0.71"
 async-std = { version = "1.12.0", features = ["attributes"] }
 byteorder = "1.4.3"
 futures = "0.3.28"
+rand = "0.8.5"
 thiserror = "1.0.40"

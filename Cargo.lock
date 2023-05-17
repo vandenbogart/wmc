@@ -485,6 +485,7 @@ dependencies = [
  "async-std",
  "byteorder",
  "futures",
+ "rand",
  "thiserror",
 ]
 

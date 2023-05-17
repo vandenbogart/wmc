@@ -34,6 +34,9 @@ struct PeerStream {
     handshake: HandShake,
 }
 impl PeerStream {
+    pub async fn read(&mut self) -> anyhow::Result<RawMessage> {
+        PeerStream::read_message(&self.stream).await
+    }
     pub async fn connect(addr: SocketAddr, opts: PeerStreamOpts) -> anyhow::Result<PeerStream> {
         let stream = TcpStream::connect(&addr)
             .await
