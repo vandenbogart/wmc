@@ -1,7 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::{net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs}, time::Duration};
 
 use anyhow::Context;
-use async_std::net::UdpSocket;
+use async_std::{net::UdpSocket, future};
 use byteorder::{BigEndian, ByteOrder};
 use rand::Rng;
 use url::Url;
@@ -28,14 +28,21 @@ impl TrackerManager {
             anyhow::bail!("Unable to send connect request");
         }
         let mut bytes_recv = [0u8; CONNECT_RESPONSE_SIZE];
-        loop {
-            let (n, peer) = socket.recv_from(&mut bytes_recv).await?;
-            if peer != addr {
-                continue;
-            } else if n != CONNECT_RESPONSE_SIZE {
-                anyhow::bail!("Unable to read connect response");
+        let duration = Duration::from_secs(3);
+        let conn_result = future::timeout(duration, async {
+            loop {
+                let (n, tracker) = socket.recv_from(&mut bytes_recv).await?;
+                if tracker != addr {
+                    continue;
+                } else if n != CONNECT_RESPONSE_SIZE {
+                    anyhow::bail!("Unable to read connect response");
+                }
+                break;
             }
-            break;
+            Ok(())
+        }).await?;
+        if conn_result.is_err() {
+            return Err(conn_result.unwrap_err().into());
         }
         let response = ConnectResponse::from_bytes(&bytes_recv);
         if response.transaction_id != request.transaction_id {
