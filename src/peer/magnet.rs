@@ -2,7 +2,7 @@ use std::{fmt::Display, str::FromStr};
 use url::Url;
 
 #[derive(Debug, PartialEq)]
-struct InfoHash {
+pub struct InfoHash {
     pub bytes: [u8; 20],
 }
 impl Display for InfoHash {
@@ -12,14 +12,14 @@ impl Display for InfoHash {
     }
 }
 
-struct Magnet {
+pub struct Magnet {
     pub info_hash: InfoHash,
     pub display_name: String,
     pub trackers: Vec<Url>,
 }
 
 impl Magnet {
-    fn from_link(link: &str) -> anyhow::Result<Self> {
+    pub fn from_link(link: &str) -> anyhow::Result<Self> {
         let decoded = urlencoding::decode(link)?;
         let slice = &decoded[8..];
         let split = slice.split("&").collect::<Vec<_>>();

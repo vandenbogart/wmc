@@ -1,26 +1,23 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 
 use anyhow::Context;
 use async_std::net::UdpSocket;
 use byteorder::{BigEndian, ByteOrder};
 use rand::Rng;
+use url::Url;
 
-struct TrackerManager {
-    connections: Vec<TrackerConnection>,
+pub struct TrackerManager {
 }
 impl TrackerManager {
-    pub async fn new() -> anyhow::Result<TrackerManager> {
-        Ok(TrackerManager {
-            connections: vec![],
-        })
-    }
-    pub async fn connect(&self, addr: SocketAddr) -> anyhow::Result<TrackerConnection> {
+    pub async fn connect(addr: Url) -> anyhow::Result<TrackerConnection> {
+        let host_port = format!("{}:{}", addr.host_str().unwrap(), addr.port().unwrap_or(80));
+        let s_addr = host_port.to_socket_addrs()?.last().unwrap();
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to establish UDP Socket")?;
-        let connection_id = TrackerManager::handshake(&socket, addr).await?;
+        let connection_id = TrackerManager::handshake(&socket, s_addr).await?;
         Ok(TrackerConnection {
-            addr,
+            addr: s_addr,
             connection_id,
         })
     }
@@ -48,9 +45,10 @@ impl TrackerManager {
     }
 }
 
-struct TrackerConnection {
-    addr: SocketAddr,
-    connection_id: i64,
+#[derive(Debug)]
+pub struct TrackerConnection {
+    pub addr: SocketAddr,
+    pub connection_id: i64,
 }
 
 #[derive(Debug)]

@@ -621,7 +621,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tRip"
+name = "t_rip"
 version = "0.1.0"
 dependencies = [
  "anyhow",

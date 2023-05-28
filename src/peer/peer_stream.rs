@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use crate::messages::{HandShake, PeerMessage, RawMessage};
+use crate::peer::messages::{HandShake, PeerMessage, RawMessage};
 use anyhow::Context;
 use byteorder::{BigEndian, ByteOrder};
 
@@ -90,51 +90,50 @@ impl PeerStream {
     }
 }
 
-struct MockTcpStream {
-    read_data: Vec<u8>,
-    write_data: Vec<u8>,
-}
-impl Read for MockTcpStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let end = min(buf.len(), self.read_data.len());
-        buf[..end].copy_from_slice(&self.read_data[..end]);
-        self.get_mut().read_data = self.read_data[end..].to_vec();
-        Poll::Ready(Ok(end))
-    }
-}
-impl Write for MockTcpStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        self.get_mut().write_data = Vec::from(buf);
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-impl Unpin for MockTcpStream {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct MockTcpStream {
+        read_data: Vec<u8>,
+        write_data: Vec<u8>,
+    }
+    impl Read for MockTcpStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let end = min(buf.len(), self.read_data.len());
+            buf[..end].copy_from_slice(&self.read_data[..end]);
+            self.get_mut().read_data = self.read_data[end..].to_vec();
+            Poll::Ready(Ok(end))
+        }
+    }
+    impl Write for MockTcpStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.get_mut().write_data = Vec::from(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    impl Unpin for MockTcpStream {}
 
     #[async_std::test]
     async fn test_peerstream_handshake() {
