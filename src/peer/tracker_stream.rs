@@ -6,20 +6,28 @@ use byteorder::{BigEndian, ByteOrder};
 use rand::Rng;
 use url::Url;
 
-pub struct TrackerManager {
+#[derive(Debug)]
+pub struct TrackerConnection {
+    pub addr: Url,
+    pub connection_id: i64,
 }
-impl TrackerManager {
-    pub async fn connect(addr: Url) -> anyhow::Result<TrackerConnection> {
+
+impl TrackerConnection {
+    pub async fn new(addr: Url) -> anyhow::Result<Self> {
+        let connection_id = TrackerConnection::connect(addr.clone()).await?;
+        Ok(Self {
+            addr,
+            connection_id,
+        })
+    }
+    pub async fn connect(addr: Url) -> anyhow::Result<i64> {
         let host_port = format!("{}:{}", addr.host_str().unwrap(), addr.port().unwrap_or(80));
         let s_addr = host_port.to_socket_addrs()?.last().unwrap();
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
             .context("Failed to establish UDP Socket")?;
-        let connection_id = TrackerManager::handshake(&socket, s_addr).await?;
-        Ok(TrackerConnection {
-            addr: s_addr,
-            connection_id,
-        })
+        let connection_id = TrackerConnection::handshake(&socket, s_addr).await?;
+        Ok(connection_id)
     }
     async fn handshake(socket: &UdpSocket, addr: SocketAddr) -> anyhow::Result<i64> {
         let request = ConnectRequest::new();
@@ -50,12 +58,38 @@ impl TrackerManager {
         }
         Ok(response.connection_id)
     }
-}
+    pub async fn announce(&self, descriptor: AnnounceRequestDescriptor) -> anyhow::Result<Vec<SocketAddr>> {
+        let host_port = format!("{}:{}", self.addr.host_str().unwrap(), self.addr.port().unwrap_or(80));
+        let s_addr = host_port.to_socket_addrs()?.last().unwrap();
+        let request = AnnounceRequest::new(descriptor);
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
+            .context("Failed to establish UDP Socket")?;
+        let bytes_sent = socket.send_to(&request.to_bytes(), &s_addr).await?;
+        if bytes_sent != ANNOUNCE_REQUEST_BYTES {
+            anyhow::bail!("Unable to send connect request");
+        }
+        let mut bytes_recv = [0u8; 4000];
+        let duration = Duration::from_secs(3);
+        let conn_result: anyhow::Result<usize> = future::timeout(duration, async {
+            Ok(loop {
+                let (n, tracker) = socket.recv_from(&mut bytes_recv).await?;
+                if tracker != s_addr {
+                    continue;
+                }
+                break n;
+            })
+        }).await?;
+        if conn_result.is_err() {
+            return Err(conn_result.unwrap_err().into());
+        }
+        let response = AnnounceResponse::from_bytes(&bytes_recv, conn_result.unwrap());
+        if response.transaction_id != request.transaction_id {
+            anyhow::bail!("Mismatched transaction ids");
+        }
+        Ok(response.peers)
 
-#[derive(Debug)]
-pub struct TrackerConnection {
-    pub addr: SocketAddr,
-    pub connection_id: i64,
+    }
 }
 
 #[derive(Debug)]
@@ -106,7 +140,7 @@ impl ConnectResponse {
 }
 
 #[derive(Debug, Copy, Clone)]
-enum AnnounceEvent {
+pub enum AnnounceEvent {
     None = 0,
     Completed,
     Started,
@@ -131,14 +165,14 @@ struct AnnounceRequest {
 }
 
 #[derive(Debug)]
-struct AnnounceRequestDescriptor {
-    connection_id: i64,
-    peer_id: [u8; 20],
-    info_hash: [u8; 20],
-    downloaded: u64,
-    left: u64,
-    uploaded: u64,
-    event: AnnounceEvent,
+pub struct AnnounceRequestDescriptor {
+    pub connection_id: i64,
+    pub peer_id: [u8; 20],
+    pub info_hash: [u8; 20],
+    pub downloaded: u64,
+    pub left: u64,
+    pub uploaded: u64,
+    pub event: AnnounceEvent,
 }
 
 const ANNOUNCE_REQUEST_BYTES: usize = 98;

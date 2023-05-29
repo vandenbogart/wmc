@@ -15,6 +15,13 @@ use crate::peer::messages::{HandShake, PeerMessage, RawMessage};
 use anyhow::Context;
 use byteorder::{BigEndian, ByteOrder};
 
+pub struct PeerConnection {
+    stream: PeerStream,
+}
+impl PeerConnection {
+
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum PeerError {
     #[error("Peer protocol mismatch")]
